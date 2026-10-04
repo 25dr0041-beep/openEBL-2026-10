@@ -103,5 +103,5 @@ The verification and merging is performed using GitHub actions. The repository i
 
 Click on the following link to download the EBeam.oas merged layout file:
 <!-- start-link -->
-https://github.com/SiEPIC/openEBL-2026-10/actions/runs/37205422527/artifacts/11304557605
+https://github.com/SiEPIC/openEBL-2026-10/actions/runs/37205483718/artifacts/11304687170
 <!-- end-link -->
