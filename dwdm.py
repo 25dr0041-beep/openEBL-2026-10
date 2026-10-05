@@ -3,41 +3,33 @@ import math
 import gdsfactory as gf
 from ubcpdk import PDK, cells
 
+PDK.activate()
+
 @gf.cell
 def dwdm_splitter():
     """
-    Direct GDSFactory recreation of the Nazca DWDM layout.
+    DWDM test structure with four integrated grating couplers.
 
     Top -> bottom:
         A: y = 381 um
-        B: y = 254 um
+        B: y = 254 um  <- input
         C: y = 127 um
         D: y =   0 um
 
-    B and D form the main vertical bus on the right.
-
-    Ring C:
-        - radius = 10 um
-        - LEFT of B-D bus
-        - collector LEFT of ring
-
-    Ring A:
-        - radius = 50 um
-        - RIGHT of B-D bus
-        - collector RIGHT of ring
+    All grating couplers are 127 um apart vertically.
     """
 
     c = gf.Component()
 
     # ========================================================
-    # PARAMETERS FROM YOUR NAZCA DESIGN
+    # PARAMETERS
     # ========================================================
 
     pitch = 127.0
 
-    y_A = 3 * pitch       # 381
-    y_B = 2 * pitch       # 254
-    y_C = pitch           # 127
+    y_A = 3 * pitch
+    y_B = 2 * pitch
+    y_C = pitch
     y_D = 0.0
 
     short_length = 20.0
@@ -51,7 +43,6 @@ def dwdm_splitter():
     ring_A_radius = 50.0
     ring_A_gap = 0.2
 
-    # Get actual UBC strip width/layer
     xs = gf.get_cross_section("strip")
     wg_width = xs.width
     wg_layer = xs.layer
@@ -85,12 +76,37 @@ def dwdm_splitter():
     D.move((0, y_D))
 
     # ========================================================
+    # GRATING COUPLERS
+    #
+    # Connecting them directly to the LEFT ports of A/B/C/D
+    # makes the waveguides extend to the RIGHT, as required
+    # by the Phot1x automated tester.
+    # ========================================================
+
+    gc_component = cells.ebeam_gc_te1550()
+
+    gc_A = c << gc_component
+    gc_A.connect("o1", A.ports["o1"])
+
+    gc_B = c << gc_component
+    gc_B.connect("o1", B.ports["o1"])
+
+    gc_C = c << gc_component
+    gc_C.connect("o1", C.ports["o1"])
+
+    gc_D = c << gc_component
+    gc_D.connect("o1", D.ports["o1"])
+
+    # Automated measurement label:
+    # B is the SECOND coupler from the top = input fiber.
+    c.add_label(
+        text="opt_in_TE_1550_device_IdoNirTheGreat_DWDM",
+        position=gc_B.ports["o1"].center,
+        layer=(10, 0),
+    )
+
+    # ========================================================
     # B -> D MAIN BUS
-    #
-    # B and D both end at x = 200.
-    # Route goes right by 30 um and then vertically.
-    #
-    # Vertical bus centerline: x = 230 um
     # ========================================================
 
     bus_x = long_length + bd_bend_radius
@@ -108,19 +124,12 @@ def dwdm_splitter():
         cross_section="strip",
     )
 
-    # Tangency points of the vertical B-D section
-    bus_top_y = y_B - bd_bend_radius     # 224
-    bus_bottom_y = y_D + bd_bend_radius  # 30
+    bus_top_y = y_B - bd_bend_radius
+    bus_bottom_y = y_D + bd_bend_radius
 
     # ========================================================
     # RING C
     # ========================================================
-
-    # Nazca:
-    # ring_C_X = bus_x - R - gap - width
-    #
-    # Nazca ring starts at its bottom point.
-    # Therefore actual ring CENTER is R above ring_C_Y.
 
     ring_C_center_x = (
         bus_x
@@ -177,7 +186,6 @@ def dwdm_splitter():
 
     collector_C.rotate(90)
 
-    # Move collector o1 exactly to desired lower point
     collector_C.move(
         (
             collector_C_x
@@ -187,7 +195,6 @@ def dwdm_splitter():
         )
     )
 
-    # Collector -> C
     gf.routing.route_single(
         c,
         port1=collector_C.ports["o2"],
@@ -265,7 +272,6 @@ def dwdm_splitter():
         )
     )
 
-    # Collector -> A
     gf.routing.route_single(
         c,
         port1=collector_A.ports["o2"],
@@ -274,16 +280,5 @@ def dwdm_splitter():
         bend=gf.components.bend_circular,
         cross_section="strip",
     )
-
-    # ========================================================
-    # EXTERNAL PORTS
-    #
-    # Important for cells.add_fiber_array()
-    # ========================================================
-
-    c.add_port(name="o1", port=A.ports["o1"])  # A
-    c.add_port(name="o2", port=B.ports["o1"])  # B
-    c.add_port(name="o3", port=C.ports["o1"])  # C
-    c.add_port(name="o4", port=D.ports["o1"])  # D
 
     return c
