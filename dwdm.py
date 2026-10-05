@@ -1,9 +1,64 @@
 from pathlib import Path
 import math
+
 import gdsfactory as gf
 from ubcpdk import PDK, cells
 
+
 PDK.activate()
+
+
+# ============================================================
+# SiEPIC-COMPATIBLE RING
+#
+# Generic GDSFactory geometry by itself does not contain the
+# SiEPIC DevRec required by the automated functional checker.
+#
+# This wrapper places the ring inside its own component and
+# surrounds it with a DevRec polygon.
+# ============================================================
+
+@gf.cell
+def siepic_ring(
+    radius: float = 10.0,
+    width: float = 0.5,
+    layer=(1, 0),
+    devrec_margin: float = 1.0,
+):
+    c = gf.Component()
+
+    ring = c << gf.components.ring(
+        radius=radius,
+        width=width,
+        layer=layer,
+    )
+
+    # --------------------------------------------------------
+    # SiEPIC Device Recognition layer
+    # UBC EBeam DevRec = layer 68 / datatype 0
+    # --------------------------------------------------------
+
+    xmin = ring.xmin - devrec_margin
+    xmax = ring.xmax + devrec_margin
+    ymin = ring.ymin - devrec_margin
+    ymax = ring.ymax + devrec_margin
+
+    c.add_polygon(
+        [
+            (xmin, ymin),
+            (xmax, ymin),
+            (xmax, ymax),
+            (xmin, ymax),
+        ],
+        layer=(68, 0),
+    )
+
+    return c
+
+
+# ============================================================
+# DWDM
+# ============================================================
 
 @gf.cell
 def dwdm_splitter():
@@ -11,6 +66,7 @@ def dwdm_splitter():
     DWDM test structure with four integrated grating couplers.
 
     Top -> bottom:
+
         A: y = 381 um
         B: y = 254 um  <- input
         C: y = 127 um
@@ -44,6 +100,7 @@ def dwdm_splitter():
     ring_A_gap = 0.2
 
     xs = gf.get_cross_section("strip")
+
     wg_width = xs.width
     wg_layer = xs.layer
 
@@ -77,28 +134,40 @@ def dwdm_splitter():
 
     # ========================================================
     # GRATING COUPLERS
-    #
-    # Connecting them directly to the LEFT ports of A/B/C/D
-    # makes the waveguides extend to the RIGHT, as required
-    # by the Phot1x automated tester.
     # ========================================================
 
     gc_component = cells.ebeam_gc_te1550()
 
     gc_A = c << gc_component
-    gc_A.connect("o1", A.ports["o1"])
+    gc_A.connect(
+        "o1",
+        A.ports["o1"],
+    )
 
     gc_B = c << gc_component
-    gc_B.connect("o1", B.ports["o1"])
+    gc_B.connect(
+        "o1",
+        B.ports["o1"],
+    )
 
     gc_C = c << gc_component
-    gc_C.connect("o1", C.ports["o1"])
+    gc_C.connect(
+        "o1",
+        C.ports["o1"],
+    )
 
     gc_D = c << gc_component
-    gc_D.connect("o1", D.ports["o1"])
+    gc_D.connect(
+        "o1",
+        D.ports["o1"],
+    )
 
-    # Automated measurement label:
-    # B is the SECOND coupler from the top = input fiber.
+    # --------------------------------------------------------
+    # Automated measurement label
+    #
+    # B is the SECOND coupler from the top = input fiber
+    # --------------------------------------------------------
+
     c.add_label(
         text="opt_in_TE_1550_device_IdoNirTheGreat_DWDM",
         position=gc_B.ports["o1"].center,
@@ -149,13 +218,26 @@ def dwdm_splitter():
         + ring_C_radius
     )
 
-    ring_C_component = gf.components.ring(
+    # --------------------------------------------------------
+    # CHANGED:
+    #
+    # Previously:
+    #     gf.components.ring(...)
+    #
+    # Now:
+    #     siepic_ring(...)
+    #
+    # Same physical ring geometry, but now it has a DevRec.
+    # --------------------------------------------------------
+
+    ring_C_component = siepic_ring(
         radius=ring_C_radius,
         width=wg_width,
         layer=wg_layer,
     )
 
     ring_C = c << ring_C_component
+
     ring_C.move(
         (
             ring_C_center_x,
@@ -190,6 +272,7 @@ def dwdm_splitter():
         (
             collector_C_x
             - collector_C.ports["o1"].center[0],
+
             collector_C_y
             - collector_C.ports["o1"].center[1],
         )
@@ -226,13 +309,18 @@ def dwdm_splitter():
         + ring_A_radius
     )
 
-    ring_A_component = gf.components.ring(
+    # --------------------------------------------------------
+    # Same change for Ring A.
+    # --------------------------------------------------------
+
+    ring_A_component = siepic_ring(
         radius=ring_A_radius,
         width=wg_width,
         layer=wg_layer,
     )
 
     ring_A = c << ring_A_component
+
     ring_A.move(
         (
             ring_A_center_x,
@@ -267,6 +355,7 @@ def dwdm_splitter():
         (
             collector_A_x
             - collector_A.ports["o1"].center[0],
+
             collector_A_y
             - collector_A.ports["o1"].center[1],
         )
