@@ -2,7 +2,7 @@ name: Post-layout simulation verification
 
 # Runs AFTER a PR has been merged into main:
 #   merge -> push to main -> "Run Layout Verification" passes -> this workflow
-# Simulates the layout files that the merged PR added or changed,
+# Simulates the layout files that the merged PR added, changed, or renamed,
 # and posts the results as a comment on that (merged) PR.
 
 on:
@@ -60,8 +60,11 @@ jobs:
             exit 0
           fi
 
-          # HEAD^1 is main before the merge, so this is exactly what the PR brought in
-          FILES=$(git diff --diff-filter=AM --name-only HEAD^1 HEAD | grep -i -E '^submissions/.*\.(gds|oas)$' | sed 's|^submissions/||' || true)
+          echo "All changes brought in by the PR:"
+          git diff --name-status HEAD^1 HEAD
+
+          # A = added, M = modified, R = renamed (lists the new name)
+          FILES=$(git diff --diff-filter=AMR --name-only HEAD^1 HEAD | grep -i -E '^submissions/.*\.(gds|oas)$' | sed 's|^submissions/||' || true)
 
           if [ -z "$FILES" ]; then
             echo "No .gds or .oas files in submissions/ in this PR. Skipping."
