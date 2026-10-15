@@ -1,4 +1,4 @@
-name: Case Sensitivity check
+name: Allowed Files / Case Sensitivity Check
 
 on:
   push:
