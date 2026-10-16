@@ -1,4 +1,4 @@
-name: Case Sensitivity check
+name: Allowed Files / Case Sensitivity Check
 
 on:
   push:
@@ -21,10 +21,48 @@ jobs:
     name: check-file-case-sensitivity
     steps:
       # Checkout the source code so we have some files to look at.
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       # Run the case checker action
       - name: Check Case Sensitivity
         uses: credfeto/action-case-checker@v1.3.0
 
+      # Only allow .gds/.oas in submissions/ and .pdf in reports/
+      - name: Check allowed files
+        if: github.event_name == 'pull_request'
+        run: |
+          # PRs from branches in this repo (maintainers, aggregation PR) are exempt
+          if [[ "${{ github.event.pull_request.head.repo.full_name }}" == "${{ github.repository }}" ]]; then
+            echo "PR from a branch in this repository. Skipping file check."
+            exit 0
+          fi
+
+          # --no-renames: a rename shows as delete + add, so both paths are checked
+          FILES=$(git diff --no-renames --name-only origin/${{ github.base_ref }}...HEAD)
+          echo "Changed files:"
+          echo "$FILES"
+
+          BAD=0
+          while IFS= read -r file; do
+            [[ -z "$file" ]] && continue
+            lower="${file,,}"
+            if [[ "$file" == submissions/* && "$lower" =~ \.(gds|oas)$ ]]; then
+              continue
+            elif [[ "$file" == reports/* && "$lower" =~ \.pdf$ ]]; then
+              continue
+            else
+              echo "❌ Not allowed: $file"
+              BAD=1
+            fi
+          done <<< "$FILES"
+
+          if [[ $BAD -eq 1 ]]; then
+            echo ""
+            echo "Only these files may be submitted:"
+            echo "  - .gds or .oas layout files in the submissions/ folder"
+            echo "  - .pdf reports in the reports/ folder"
+            exit 1
+          fi
+          echo "✅ All changed files are allowed."
