@@ -1,110 +1,79 @@
 name: Post-layout simulation verification
 
-
-# Runs if the layout functional verification passes
-# Runs a circuit simulation, and returns the results
+# Runs AFTER a PR has been merged into main:
+#   merge -> push to main -> "Run Layout Verification" passes -> this workflow
+# Simulates the layout files that the merged PR added, changed, or renamed,
+# and posts the results as a comment on that (merged) PR.
 
 on:
   workflow_run:
     workflows: ["Run Layout Verification"]
     types:
       - completed
-  workflow_dispatch:
+
+permissions:
+  contents: write   # to push result images to the simulation-results branch
 
 jobs:
   secure-sim:
-    
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' && github.repository_owner == 'SiEPIC' }}
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.repository_owner == 'SiEPIC' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
 
     steps:
-      - name: Checkout triggering commit
+      - name: Checkout merge commit
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository }}
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
-      - name: Fetch base branch
-        run: |
-          git fetch origin main --no-tags --prune
-  
-      - name: Debug Git info after checkout
-        run: |
-          echo "Checked out commit:"
-          git rev-parse HEAD
-          echo "Commit message:"
-          git log -1 --pretty=%B
-          echo "Changed files compared to main:"
-          git fetch origin main
-          git diff --name-only origin/main...HEAD > files_changed.txt
-          cat files_changed.txt
-            
-          echo "Commits in this range:"
-          git log --pretty=format:'%h %an <%ae>' origin/main..HEAD || true
-        
-
-      - name: Get PR number, username, and fork repo
+      - name: Find the merged PR for this commit
         id: getpr
         run: |
-          echo "Finding PR for commit: ${{ github.event.workflow_run.head_sha }}"
-          echo "Branch: ${{ github.event.workflow_run.head_branch }}"
-          
-          # Get all open PRs with their head SHA and branch info
-          PR_JSON=$(gh pr list --state open --json number,author,headRepositoryOwner,headRefName,headRefOid)
-          
-          # Find the PR that matches both the commit SHA and branch name
-          # First try to match by SHA (most reliable)
-          MATCHING_PR=$(echo "$PR_JSON" | jq --arg sha "${{ github.event.workflow_run.head_sha }}" --arg branch "${{ github.event.workflow_run.head_branch }}" '
-            .[] | select(.headRefOid == $sha and .headRefName == $branch)
-          ')
-          
-          # If no exact SHA match, fall back to branch name with most recent update
-          if [ -z "$MATCHING_PR" ] || [ "$MATCHING_PR" = "null" ]; then
-            echo "No exact SHA match found, searching by branch name..."
-            MATCHING_PR=$(gh pr list --state open --json number,author,headRepositoryOwner,headRefName,updatedAt --search "head:${{ github.event.workflow_run.head_branch }}" --limit 100 | jq --arg branch "${{ github.event.workflow_run.head_branch }}" '
-              [.[] | select(.headRefName == $branch)] | sort_by(.updatedAt) | reverse | .[0]
-            ')
-          fi
-          
-          PR_NUMBER=$(echo "$MATCHING_PR" | jq -r '.number')
-          USERNAME=$(echo "$MATCHING_PR" | jq -r '.author.login')
-          FORK_OWNER=$(echo "$MATCHING_PR" | jq -r '.headRepositoryOwner.login')
-          REPO_NAME=$(basename "${{ github.repository }}")
-          FORK_REPO="$FORK_OWNER/$REPO_NAME"
-          
+          SHA="${{ github.event.workflow_run.head_sha }}"
+          echo "Commit on main: $SHA"
+          git log -1 --pretty=%B
+
+          # GitHub lists the PR(s) associated with a commit, including merged ones
+          PR_JSON=$(gh api "repos/${{ github.repository }}/commits/$SHA/pulls" \
+            --jq '[.[] | select(.merged_at != null)] | .[0] // empty')
+
+          PR_NUMBER=$(echo "$PR_JSON" | jq -r '.number // empty')
+          USERNAME=$(echo "$PR_JSON" | jq -r '.user.login // empty')
+
           echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
           echo "username=$USERNAME" >> $GITHUB_OUTPUT
-          echo "fork_repo=$FORK_REPO" >> $GITHUB_OUTPUT
-          echo "Found username: $USERNAME"
           echo "Found PR #: $PR_NUMBER"
-          echo "Fork repo: $FORK_REPO"
+          echo "Found username: $USERNAME"
         env:
           GH_TOKEN: ${{ secrets.PAT }}
 
-      - name: Detect layout files
+      - name: Detect layout files added or changed by the PR
         id: check_files
         run: |
-          USERNAME="${{ steps.getpr.outputs.username }}"
-          echo "Detected GitHub username: $USERNAME"
+          if [ -z "${{ steps.getpr.outputs.pr_number }}" ]; then
+            echo "No merged PR found for this commit (direct push?). Skipping."
+            echo "found=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
 
-          FILES=$(git diff --diff-filter=AM --name-only origin/main...HEAD | grep -i -E '\.(gds|oas)$' | sed 's|^submissions/||'  || true)
+          echo "All changes brought in by the PR:"
+          git diff --name-status HEAD^1 HEAD
+
+          # A = added, M = modified, R = renamed (lists the new name)
+          FILES=$(git diff --diff-filter=AMR --name-only HEAD^1 HEAD | grep -i -E '^submissions/.*\.(gds|oas)$' | sed 's|^submissions/||' || true)
 
           if [ -z "$FILES" ]; then
-            echo "No .gds or .oas files in submissions/"
+            echo "No .gds or .oas files in submissions/ in this PR. Skipping."
             echo "found=false" >> $GITHUB_OUTPUT
-            FILES_ALL=$(git diff --diff-filter=AM --name-only origin/main...HEAD  || true)
-            if [ -z "$FILES_ALL" ]; then
-              echo "No files in pull request"
-            else
-              echo "All files in pull request: $FILES_ALL"
-            fi
           else
             echo "$FILES"
             echo "$FILES" > files_to_copy.txt
             echo "found=true" >> $GITHUB_OUTPUT
           fi
-
 
       - name: Setup SSH
         if: steps.check_files.outputs.found == 'true'
@@ -114,7 +83,6 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keygen -l -f ~/.ssh/id_ed25519 || echo "Invalid SSH key"
 
-          # Write SSH config with ProxyJump
           cat <<EOF > ~/.ssh/config
           Host turing
             HostName turing.phas.ubc.ca
@@ -133,108 +101,56 @@ jobs:
 
           chmod 600 ~/.ssh/config
 
-      - name: Copy .py files to Baker
+      - name: Copy layout files to Baker
         if: steps.check_files.outputs.found == 'true'
         run: |
-          PR_NUMBER="${{ steps.getpr.outputs.pr_number }}"
           USERNAME="${{ steps.getpr.outputs.username }}"
-      
-          echo "Simulating for PR $PR_NUMBER"
+          echo "Simulating for PR #${{ steps.getpr.outputs.pr_number }} by $USERNAME"
 
           if [ -z "$USERNAME" ]; then
             echo "❌ USERNAME is blank. Refusing to proceed."
             exit 1
           fi
-          
-          echo "simulation files:"
-          cat files_to_copy.txt
 
+          cat files_to_copy.txt
           ssh baker "mkdir -p ~/simulations/$USERNAME; rm -rf ~/simulations/$USERNAME/*"
-      
-          # Create space-separated list of existing files
+
           FILES=$(awk '{print "submissions/" $0}' files_to_copy.txt | xargs -r ls 2>/dev/null)
-      
           if [ -z "$FILES" ]; then
             echo "⚠️ No existing files to copy. Exiting."
             exit 0
           fi
-      
-          echo "Copying files to baker..."
+
           scp $FILES baker:~/simulations/$USERNAME/
-        
-
-      # - name: Copy .py files to Baker
-      #   if: steps.check_files.outputs.found == 'true'
-      #   run: |
-
-      #     PR_NUMBER="${{ steps.getpr.outputs.pr_number }}"
-      #     echo "Simulating for PR $PR_NUMBER"
-      #     echo "simulation files:"
-      #     cat files_to_copy.txt
-
-      #     USERNAME="${{ steps.getpr.outputs.username }}"
-      #     ssh baker "mkdir -p ~/simulations/$USERNAME; rm -rf ~/simulations/$USERNAME/*"
-
-      #     while IFS= read -r file; do
-      #       if [ -f "submissions/$file" ]; then
-      #         echo "Copying $file to baker:~/simulations/$USERNAME/"
-      #         scp "submissions/$file" baker:~/simulations/$USERNAME/
-      #         if [ $? -ne 0 ]; then
-      #           echo "❌ Failed to copy $file"
-      #           exit 1
-      #         fi
-      #       else
-      #         echo "⚠️ File submissions/$file not found (possibly deleted), skipping."
-      #       fi
-      #     done < files_to_copy.txt
 
       - name: Run simulation and fetch results
         if: steps.check_files.outputs.found == 'true'
         run: |
           USERNAME="${{ steps.getpr.outputs.username }}"
-          PR_NUMBER="${{ steps.getpr.outputs.pr_number }}"
           FILE_LIST=$(<files_to_copy.txt)
-
-          echo "Running remote simulation for $USERNAME"
-
-          echo "Formatting comment..."
 
           echo "This is an experimental feature.  The goal is to run a circuit simulation on the design, and return the results for human verification." > comment.txt
           echo "" >> comment.txt
 
           for file in $FILE_LIST; do
             FILE_BASENAME=$(basename "$file")
-            FILE_REMOTE="~/simulations/$USERNAME/$FILE_BASENAME"
-            REMOTE_DIR="~/simulations/$USERNAME"
-            
             echo "Starting simulation on Baker for $FILE_BASENAME"
 
             # 5 min time limit
             timeout 300s ssh baker "cd simulations && python3 run_circuit_simulation.py $USERNAME/$FILE_BASENAME" \
               | tee sim_stdout.txt
-            RET_CODE=${PIPESTATUS[0]}  # capture ssh return code with pipe
-            # RET_CODE=$?
-
+            RET_CODE=${PIPESTATUS[0]}
             echo "SSH return code: $RET_CODE"
+            [ $RET_CODE -eq 124 ] && echo "❌ SSH command timed out."
 
-            if [ $RET_CODE -eq 124 ]; then
-              echo "❌ SSH command timed out."
-            fi
-
-            echo "Fetching new output files from Baker..."
-            timeout 60s rsync -avz --ignore-existing --update baker:simulations/$USERNAME/ ./output/
-            RSYNC_RET=$?
-          
-            if [ $RSYNC_RET -eq 124 ]; then
-              echo "❌ rsync command timed out."
-            fi
+            timeout 60s rsync -avz --ignore-existing --update baker:simulations/$USERNAME/ ./output/ \
+              || echo "❌ rsync failed or timed out."
 
             if [ $RET_CODE -eq 0 ]; then
               echo "✅ Simulation results for \`$FILE_BASENAME\`" >> comment.txt
             else
               echo "❌ Simulation failed for \`$FILE_BASENAME\` (exit code $RET_CODE)" >> comment.txt
             fi
-    
             echo "" >> comment.txt
 
             if [ -s sim_stdout.txt ]; then
@@ -244,95 +160,69 @@ jobs:
               echo '```' >> comment.txt
               echo "" >> comment.txt
             fi
-
-            #if [ -s sim_stderr.txt ]; then
-            #  echo "**stderr:**" >> comment.txt
-            #  echo '```' >> comment.txt
-            #  cat sim_stderr.txt >> comment.txt
-            #  echo '```' >> comment.txt
-            #  echo "" >> comment.txt
-            #fi
-
           done
 
-
-      - name: Commit PNGs to PR branch submissions folder
+      # GitHub comments can only show images that are hosted somewhere.
+      # They go to a separate "simulation-results" branch in this repo:
+      # not into main, and not into the student's fork.
+      # Pushed with GITHUB_TOKEN, so it does not trigger any workflows.
+      - name: Publish result images
         if: steps.check_files.outputs.found == 'true'
         run: |
           PR_NUMBER="${{ steps.getpr.outputs.pr_number }}"
-          USERNAME="${{ steps.getpr.outputs.username }}"
-          BRANCH_NAME="${{ github.event.workflow_run.head_branch }}"
-          echo "Resolving fork repository for PR #$PR_NUMBER..."
-          
-          FORK_REPO=${{ steps.getpr.outputs.fork_repo }}
-          echo "Committing PNGs to forked PR branch: $FORK_REPO $BRANCH_NAME"
+          if ! ls output/*.png >/dev/null 2>&1; then
+            echo "No PNGs produced."
+            exit 0
+          fi
 
-          # Clone forked repo + checkout PR branch
-          echo "git clone"
-          git clone --depth=1 --branch "$BRANCH_NAME" "https://x-access-token:${{ secrets.PAT }}@github.com/$FORK_REPO.git" fork-pr
-          echo "cd fork-pr"
-          cd fork-pr
+          REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          if git ls-remote --exit-code --heads "$REPO_URL" simulation-results >/dev/null 2>&1; then
+            git clone --depth=1 --branch simulation-results "$REPO_URL" results
+          else
+            mkdir results
+            git -C results init -b simulation-results
+            git -C results remote add origin "$REPO_URL"
+          fi
 
-          echo "git config"
+          cd results
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
+          mkdir -p "pr-$PR_NUMBER"
+          cp ../output/*.png "pr-$PR_NUMBER/"
+          git add "pr-$PR_NUMBER"
+          git commit -m "Simulation results for PR #$PR_NUMBER" || echo "No changes"
+          git push origin simulation-results
 
-          mkdir -p submissions
-          mkdir -p submissions/circuit_simulations
-          cp ../output/*.png submissions/circuit_simulations/ || echo "No PNGs found"
-
-          echo "git add"
-          git add submissions/circuit_simulations/*.png || true
-          echo "git commit"
-          git commit -m "Add simulation result PNGs for PR #$PR_NUMBER" || echo "No changes"
-          echo "git push origin"
-          git push origin "$BRANCH_NAME"
-
-        env:
-          GITHUB_TOKEN: ${{ secrets.PAT }}
-
-
-      - name: Append PNG links to comment
+      - name: Append images to comment
         if: steps.check_files.outputs.found == 'true'
         run: |
-          echo "📸 Simulation result image(s):" >> comment.txt
-          BRANCH_NAME="${{ github.event.workflow_run.head_branch }}"
-          FORK_REPO="${{ steps.getpr.outputs.fork_repo }}"
-          
-          for img in output/*.png; do
-            [ -f "$img" ] || continue
-            FILENAME=$(basename "$img")
-            echo "![${FILENAME}](https://github.com/${FORK_REPO}/blob/${BRANCH_NAME}/submissions/circuit_simulations/${FILENAME}?raw=true)" >> comment.txt
-          done
+          PR_NUMBER="${{ steps.getpr.outputs.pr_number }}"
+          if ls output/*.png >/dev/null 2>&1; then
+            echo "📸 Simulation result image(s):" >> comment.txt
+            for img in output/*.png; do
+              FILENAME=$(basename "$img")
+              echo "![${FILENAME}](https://github.com/${{ github.repository }}/blob/simulation-results/pr-${PR_NUMBER}/${FILENAME}?raw=true)" >> comment.txt
+            done
+            echo "" >> comment.txt
+          fi
+
+          echo "_To re-run this simulation, update your layout file and submit it in a new pull request._" >> comment.txt
           echo "" >> comment.txt
-
-          # echo "_To re-run this simulation, comment **please resimulate** below._" >> comment.txt  # not working
-
-          echo "_To re-run this simulation, please make a change to the layout file (simply running V verification will change the date stamp in the layout), save it, and upload it to your GitHub fork. This will trigger this simulation to run again._" >> comment.txt
-          echo "" >> comment.txt
-
           echo " I hereby grant you permission to use these plots for inclusion in a course report." >> comment.txt
           echo "" >> comment.txt
 
-          #echo "_We have implemented automated computation of the ebeam-dc-halfring-straight s-parameters, for TE 1550. If the parameters chosen in the design were missing, a simulation job was submitted, and the CML on the server will be automatically updated, and available on for future circuit simulations._" >> comment.txt
-          #echo "" >> comment.txt
-          
+          dt=$(TZ='America/Los_Angeles' date '+%Y-%m-%d %H:%M:%S %Z')
+          echo " - Simulation date: $dt " >> comment.txt
+
       - name: Find existing simulation comment
-        uses: peter-evans/find-comment@v3  
+        uses: peter-evans/find-comment@v3
         if: steps.check_files.outputs.found == 'true'
         id: fc
         with:
+          token: ${{ secrets.PAT }}
           issue-number: ${{ steps.getpr.outputs.pr_number }}
           body-includes: "This is an experimental feature."
-        env:
-          GH_TOKEN: ${{ secrets.PAT }}
 
-      - name: Update comment
-        if: steps.fc.outputs.comment-id != ''
-        run: |
-          dt=$(TZ='America/Los_Angeles' date '+%Y-%m-%d %H:%M:%S %Z')
-          echo " - Simulation date: $dt " >> comment.txt
-              
       - name: Post simulation results as PR comment
         if: steps.check_files.outputs.found == 'true'
         uses: peter-evans/create-or-update-comment@v3
@@ -343,4 +233,3 @@ jobs:
           body-path: comment.txt
           comment-id: ${{ steps.fc.outputs.comment-id }}
           edit-mode: replace
-          
